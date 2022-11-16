@@ -13,7 +13,8 @@ from time import sleep
 class WiZard():
     DEFAULT_CONFIG_PATH = os.path.join(os.path.dirname(
         os.path.abspath(__file__)), "wizset.conf")
-    DEFAULT_CONFIG = {"bulbs": {}, "groups": {}, "presets": {}}
+    DEFAULT_CONFIG = {"bulbs": {}, "groups": {}, "presets": {
+        "global": {}, "groups": {}, "bulbs": {}}}
     SCENES = wiz_api.get_scene_names()
 
     def __init__(self, config_file=None):
@@ -27,14 +28,15 @@ class WiZard():
 
     def load_settings(self):
         if not os.path.exists(self.config_file):
+            print("created config file")
             self.save_settings()
             return
 
         try:
             with open(self.config_file, "r") as f:
                 self.config = json.load(f)
-                self.config.update(self.DEFAULT_CONFIG)
         except json.decoder.JSONDecodeError:
+            print("ERROR: invalid config file, overwriting")
             self.save_settings()
 
     def save_settings(self):
