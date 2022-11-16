@@ -1,0 +1,497 @@
+#!/usr/bin/env python3
+from typing import List
+import json
+from pywizlight import wizlight, PilotBuilder
+from wizard import wiz_api
+import asyncio
+import os
+import sys
+from copy import deepcopy as copy
+from time import sleep
+
+
+class WiZard():
+    DEFAULT_CONFIG_PATH = os.path.join(os.path.dirname(
+        os.path.abspath(__file__)), "wizset.conf")
+    DEFAULT_CONFIG = {"bulbs": {}, "groups": {}, "presets": {}}
+    SCENES = wiz_api.get_scene_names()
+
+    def __init__(self, config_file=None):
+        if config_file is None:
+            config_file = self.DEFAULT_CONFIG_PATH
+
+        self.config_file = os.path.abspath(config_file)
+        self.config = self.DEFAULT_CONFIG
+
+        self.load_settings()
+
+    def load_settings(self):
+        if not os.path.exists(self.config_file):
+            self.save_settings()
+            return
+
+        try:
+            with open(self.config_file, "r") as f:
+                self.config = json.load(f)
+                self.config.update(self.DEFAULT_CONFIG)
+        except json.decoder.JSONDecodeError:
+            self.save_settings()
+
+    def save_settings(self):
+        os.makedirs(os.path.dirname(self.config_file), exist_ok=True)
+
+        with open(self.config_file, "w") as f:
+            json.dump(self.config, f, indent=4)
+
+    def scan_bulbs(self) -> int:
+        """Scans for bulbs in the network
+
+        ret: number of bulbs found
+        """
+        loop = asyncio.get_event_loop()
+        bulbs = loop.run_until_complete(wiz_api.search())
+
+        bak = copy(self.config["bulbs"])
+        self.config["bulbs"].clear()
+
+        for bulb in bulbs:
+            bulb_mac = bulb.mac
+            bulb_ip = bulb.ip
+
+            bulb_json = {"ip": bulb_ip, "alias": ""}
+            if bulb_mac in bak:
+                bulb_json["alias"] = bak[bulb_mac]["alias"]
+
+            self.config["bulbs"][bulb_mac] = bulb_json
+
+        self.save_settings()
+        return len(bulbs)
+
+    def target_macs_to_bulbs(self, target_macs) -> List[wizlight]:
+        bulbs = []
+        for bulb_mac in target_macs:
+            bulb_ip = self.config["bulbs"][bulb_mac]["ip"]
+            bulbs.append(wiz_api.bulb_from(ip=bulb_ip, mac=bulb_mac))
+
+        return bulbs
+
+    @staticmethod
+    def __turn_off(bulb: wizlight):
+        loop = asyncio.get_event_loop()
+        loop.run_until_complete(wiz_api.turn_off(bulb))
+
+    def turn_bulbs_off(self, target_macs):
+        bulbs = self.target_macs_to_bulbs(target_macs)
+
+        for bulb in bulbs:
+            self.__turn_off(bulb)
+
+    @staticmethod
+    def __set_rgbB(bulb: wizlight, r, g, b, B):
+        loop = asyncio.get_event_loop()
+        loop.run_until_complete(wiz_api.setBulb(bulb, (r, g, b), brightness=B))
+
+    def set_bulbs_rgb(self, target_macs, r, g, b, B):
+        bulbs = self.target_macs_to_bulbs(target_macs)
+
+        for bulb in bulbs:
+            self.__set_rgbB(bulb, r, g, b, B)
+
+    def cli_set_rgb(self, args, target_macs):
+        if len(args) < 3:
+            print("ERROR: not enough arguments for `rgb`")
+            return
+
+        try:
+            r = int(args.pop(0))
+            g = int(args.pop(0))
+            b = int(args.pop(0))
+            B = 255
+            if len(args):
+                B = int(args.pop(0))
+        except ValueError:
+            print("ERROR: invalid parameters for `rgb`")
+            print(f"{r=} {g=} {b=} {B=}")
+            return
+
+        self.set_bulbs_rgb(target_macs, r, g, b, B)
+
+    def list_groups(self):
+        group_names = self.config["groups"].keys()
+        if group_names:
+            print("GROUPS")
+            for group_name in group_names:
+                print(f"  - {group_name}")
+        else:
+            print("no groups")
+
+    def list_bulbs(self, group_name=None):
+        if group_name is None:
+            list_loc = "all bulbs"
+            bulb_mac_list = self.config["bulbs"].keys()
+        else:
+            list_loc = f"GROUP `{group_name}`"
+            bulb_mac_list = self.config["groups"][group_name]["bulbs"]
+
+        print(list_loc)
+        if not bulb_mac_list:
+            print("nothing to see")
+            return
+        for bulb_mac in bulb_mac_list:
+            bulb_ip = self.config["bulbs"][bulb_mac]["ip"]
+            bulb_alias = self.config["bulbs"][bulb_mac]["alias"]
+            bulb_idx = list(self.config["bulbs"].keys()).index(bulb_mac)
+
+            print(f"{bulb_idx} -- {bulb_mac}")
+            print(f"    Alias: {bulb_alias}")
+            print(f"    IP   : {bulb_ip}")
+
+    def list_scenes(self):
+        print("SCENES:")
+        for idx, scene in enumerate(self.SCENES):
+            print(f"{idx}: {scene}")
+
+    @staticmethod
+    def __set_scene(bulb: wizlight, scene_idx: int):
+        scene_name = WiZard.SCENES[scene_idx]
+        loop = asyncio.get_event_loop()
+        loop.run_until_complete(wiz_api.setBulb(
+            bulb, scene=scene_name))
+
+    def set_bulbs_scene(self, target_macs, scene_idx):
+        bulbs = self.target_macs_to_bulbs(target_macs)
+
+        for bulb in bulbs:
+            self.__set_scene(bulb, scene_idx)
+
+    def cli_set_scene(self, args, target_macs):
+        if len(args) < 1:
+            self.list_scenes()
+            scene_id = input("select > ").strip()
+        else:
+            scene_id = args.pop(0)
+
+        try:
+            scene_idx = int(scene_id)
+            if scene_idx < 0 or scene_idx > len(self.SCENES)-1:
+                raise ValueError
+        except ValueError:
+            print("ERROR: invalid index")
+            return
+
+        self.set_bulbs_scene(target_macs, scene_idx)
+
+    def create_group(self, group_name):
+        self.config["groups"][group_name] = {"bulbs": []}
+        self.save_settings()
+
+    def __get_bulb_state(self, bulb: wizlight):
+        loop = asyncio.get_event_loop()
+        state = loop.run_until_complete(wiz_api.getState(bulb))
+        return state
+
+    def __set_bulb_state(self, bulb: wizlight, state: PilotBuilder):
+        loop = asyncio.get_event_loop()
+        loop.run_until_complete(bulb.set_state(state))
+
+    def flash_bulb(self, bulb_mac, keep=True):
+        bulb_ip = self.config["bulbs"][bulb_mac]["ip"]
+
+        bulb = wiz_api.bulb_from(ip=bulb_ip, mac=bulb_mac)
+
+        if keep:
+            bulb_state = self.__get_bulb_state(bulb)
+            bulb_builder = wiz_api.parser_to_builder(bulb_state)
+
+        sleep_time = 0.6
+        scene_idx = 11
+
+        self.__turn_off(bulb)
+        sleep(sleep_time)
+        self.__set_scene(bulb, scene_idx)
+        sleep(sleep_time)
+        self.__turn_off(bulb)
+        sleep(sleep_time)
+        self.__set_scene(bulb, scene_idx)
+
+        if keep:
+            sleep(sleep_time)
+            self.__turn_off(bulb)
+            sleep(sleep_time)
+            self.__set_bulb_state(bulb, bulb_builder)
+
+    def get_alias_list(self):
+        return [bulb["alias"] for bulb in self.config["bulbs"].values()]
+
+    def print_help(self):
+        help_msg = """wizset <command>
+
+COMMANDS
+    scan                        -- scans for bulbs
+    rgb <r> <g> <b> [<B>]       -- set rgb for all bulbs
+    scene <scene_number>        -- set scene for all bulbs
+    off                         -- turn all bulbs off
+    group <group_subcmd>        -- group related, see GROUP section
+    bulb <bulb_subcmd>          -- bulb related, see BULB section
+
+
+BULB_SUBCOMMANDS
+    list                        -- list bulbs
+    <bulb_idx> <action>         -- single bulb control
+    ACTIONS
+        rgb <r> <g> <b> [<B>]   -- set rgb for bulb
+        scene <scene_number>    -- set scene for bulb
+        off                     -- turn bulb off
+        flash                   -- bulb go flash
+        alias <name>            -- set alias
+
+
+GROUP_SUBCOMMANDS
+    list                        -- list groups
+    create <group_name>         -- create new group
+    delete <group_name>         -- delete group
+    <group_name> <action>       -- group specific
+    ACTIONS
+        bulbs                   -- list bulbs in group
+        toggle [<bulb_idx>]     -- add or remove bulb from group
+        rgb <r> <g> <b> [<B>]   -- set rgb for bulbs in group
+        scene [<scene_number>]  -- set scene for bulbs in group
+        off                     -- turn bulbs in group off
+"""
+        print(help_msg)
+
+    def suggest_help(self):
+        print("should check help")
+
+    def wizset_cli(self):
+        args = sys.argv
+        name = args.pop(0)
+
+        if len(args) < 1:
+            self.print_help()
+            return
+
+        cmd = args.pop(0)
+
+        if cmd in ["scan", "s"]:
+            print("scanning for bulbs")
+            found = self.scan_bulbs()
+            print(f"found {found} bulbs")
+
+        elif cmd == "off":
+            print("turning all bulbs off")
+            bulb_macs = self.config["bulbs"].keys()
+            self.turn_bulbs_off(bulb_macs)
+
+        elif cmd == "rgb":
+            bulb_macs = self.config["bulbs"].keys()
+            self.cli_set_rgb(args, target_macs=bulb_macs)
+
+        elif cmd == "scene":
+            bulb_macs = self.config["bulbs"].keys()
+            self.cli_set_scene(args, target_macs=bulb_macs)
+
+        elif cmd == "group":
+            if len(args) < 1:
+                self.print_help()
+                return
+
+            subcmd = args.pop(0)
+
+            if subcmd in ["list", "l", "ls"]:
+                self.list_groups()
+
+            elif subcmd in ["create", "c"]:
+                if len(args) < 1:
+                    print("ERROR: missing argument <group_name> for `group create`")
+                    return
+
+                BANNED_GROUP_NAMES = ["list", "l",
+                                      "ls", "create", "c", "delete", "del", "d"]
+
+                EXISTING_GROUP_NAMES = self.config["groups"].keys()
+
+                group_name = args.pop(0)
+                if group_name in BANNED_GROUP_NAMES:
+                    print(f"ERROR: cannot create group `{group_name}`")
+                    print(f"reserved names: {', '.join(BANNED_GROUP_NAMES)}")
+                    return
+
+                if group_name in EXISTING_GROUP_NAMES:
+                    print(f"ERROR: cannot create group `{group_name}`")
+                    print(f"taken names: {', '.join(EXISTING_GROUP_NAMES)}")
+                    return
+
+                self.create_group(group_name)
+                print(f"group `{group_name}` created")
+
+            elif subcmd in ["delete", "del", "d"]:
+                if len(args) < 1:
+                    print("ERROR: missing argument <group_name> for `group delete`")
+                    return
+                group_name = args.pop(0)
+
+                if group_name not in self.config["groups"]:
+                    print(f"ERROR: group `{group_name}` does not exist")
+                    return
+
+                del self.config["groups"][group_name]
+                self.save_settings()
+                print(f"group `{group_name}` removed")
+
+            elif subcmd in self.config["groups"].keys():
+                group_name = subcmd
+
+                if len(args) < 1:
+                    print("ERROR: no action specified for `group <group_name>`")
+                    return
+
+                action = args.pop(0)
+
+                if action in ["toggle", "t"]:
+                    if len(args) < 1:
+                        self.list_bulbs()
+
+                        bulb_id = input("select > ").strip()
+                    else:
+                        bulb_id = args.pop(0)
+                    if not bulb_id:
+                        print("ERROR: invalid")
+                        return
+
+                    alias_map = {bulb_data["alias"]: idx
+                                 for idx, bulb_data in enumerate(self.config["bulbs"].values())}
+                    mac_map = {bulb_mac: idx
+                               for idx, bulb_mac in enumerate(self.config["bulbs"].keys())}
+
+                    # try bulb alias
+                    if bulb_id in alias_map.keys():
+                        bulb_idx = alias_map[bulb_id]
+
+                    # try bulb mac
+                    elif bulb_id in mac_map.keys():
+                        bulb_idx = alias_map[bulb_id]
+                    else:
+                        # try bulb idx
+                        try:
+                            bulb_idx = int(bulb_id)
+                            if bulb_idx < 0 or bulb_idx > len(self.config["bulbs"].keys())-1:
+                                raise ValueError
+                        except ValueError:
+                            print(f"ERROR: invalid `{bulb_id}`")
+                            return
+                    bulb_mac = list(self.config["bulbs"].keys())[bulb_idx]
+
+                    if bulb_mac in self.config["groups"][group_name]["bulbs"]:
+                        self.config["groups"][group_name]["bulbs"].remove(
+                            bulb_mac)
+                        print(f"bulb `{bulb_idx}:{bulb_mac}` removed")
+                    else:
+                        self.config["groups"][group_name]["bulbs"].append(
+                            bulb_mac)
+                        print(f"bulb `{bulb_idx}:{bulb_mac}` added")
+                    self.save_settings()
+
+                elif action == "bulbs":
+                    self.list_bulbs(group_name)
+
+                elif action == "rgb":
+                    bulb_macs = self.config["groups"][group_name]["bulbs"]
+                    self.cli_set_rgb(args, target_macs=bulb_macs)
+
+                elif action == "scene":
+                    bulb_macs = self.config["groups"][group_name]["bulbs"]
+                    self.cli_set_scene(args, target_macs=bulb_macs)
+
+                elif action == "off":
+                    bulb_macs = self.config["groups"][group_name]["bulbs"]
+                    self.turn_bulbs_off(bulb_macs)
+
+                else:
+                    print(
+                        f"ERROR: unknown action `{action}` for `group {group_name}`")
+
+            else:
+                print(f"ERROR: unknown subcommand `{subcmd}` for `group`")
+
+        elif cmd == "bulb":
+            if len(args) < 1:
+                print("ERROR: no argument provided for `bulb`")
+                return
+
+            subcmd: str = args.pop(0)
+
+            if subcmd in ["list", "ls", "l"]:
+                self.list_bulbs()
+                return
+
+            elif subcmd in self.get_alias_list():
+                bulb_idx = self.get_alias_list().index(subcmd)
+
+            elif subcmd.isdecimal():
+                try:
+                    bulb_idx = int(subcmd)
+
+                    if bulb_idx < 0 or bulb_idx > len(self.config["bulbs"])-1:
+                        raise ValueError
+
+                except ValueError:
+                    print(f"ERROR: invalid `{subcmd}`")
+                    return
+
+            else:
+                print(f"ERROR: unknown subcommand `{subcmd}` for `bulb`")
+                return
+
+            # bulb menu
+
+            if len(args) < 1:
+                print("ERROR: no action provided")
+                return
+
+            action = args.pop(0)
+            bulb_mac = list(self.config["bulbs"].keys())[bulb_idx]
+
+            if action == "off":
+                print("turning bulb off")
+                self.turn_bulbs_off([bulb_mac])
+
+            elif action == "flash":
+                print(f"flashing bulb {bulb_idx}")
+                self.flash_bulb(bulb_mac)
+
+            elif action == "rgb":
+                self.cli_set_rgb(args, target_macs=[bulb_mac])
+
+            elif action == "scene":
+                self.cli_set_scene(args, target_macs=[bulb_mac])
+
+            elif action == "alias":
+                BANNED_BULB_NAMES = ["ls", "list", "l"]
+
+                if len(args) < 1:
+                    bulb_alias = input("alias >")
+                else:
+                    bulb_alias = args.pop(0)
+
+                if bulb_alias in BANNED_BULB_NAMES:
+                    print(f"ERROR: cannot set alias {bulb_alias}")
+                    print(
+                        f"reserved names: {', '.join(BANNED_BULB_NAMES)}")
+                    return
+
+                self.config["bulbs"][bulb_mac]["alias"] = bulb_alias
+                self.save_settings()
+                print(f"Alias `{bulb_alias}` set")
+
+            else:
+                print(f"ERROR: unknown action `{action}`")
+
+        else:
+            print(f"ERROR: unknown command `{cmd}`")
+
+
+if __name__ == "__main__":
+    args = sys.argv
+    wiz = WiZard()
+    wiz.wizset_cli()
