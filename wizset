@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 from typing import List
 import json
-from pywizlight import wizlight, PilotBuilder
+from pywizlight import wizlight, PilotBuilder, PilotParser
 from wizard import wiz_api
 import asyncio
 import os
@@ -13,8 +13,7 @@ from time import sleep
 class WiZard():
     DEFAULT_CONFIG_PATH = os.path.join(os.path.dirname(
         os.path.abspath(__file__)), "wizset.conf")
-    DEFAULT_CONFIG = {"bulbs": {}, "groups": {}, "presets": {
-        "global": {}, "groups": {}, "bulbs": {}}}
+    DEFAULT_CONFIG = {"bulbs": {}, "groups": {}, "presets": {}}
     SCENES = wiz_api.get_scene_names()
 
     def __init__(self, config_file=None):
@@ -166,6 +165,32 @@ class WiZard():
         for bulb in bulbs:
             self.__set_scene(bulb, scene_idx)
 
+    def apply_preset(self, preset_name):
+        for bulb_mac, preset in self.config["presets"][preset_name].items():
+            bulb_ip = self.config["bulbs"][bulb_mac]["ip"]
+            bulb = wiz_api.bulb_from(ip=bulb_ip, mac=bulb_mac)
+            bulb_builder = wiz_api.parser_dict_to_builder(preset)
+
+            self.__set_bulb_state(bulb, bulb_builder)
+        print(f"applied preset `{preset_name}`")
+
+    def cli_save_preset(self, args, target_macs):
+        if len(args) < 1:
+            print("ERROR: no preset name provided")
+            return
+        preset_name = args.pop(0)
+        preset = {}
+        for bulb_mac in target_macs:
+            bulb_ip = self.config["bulbs"][bulb_mac]["ip"]
+            bulb = wiz_api.bulb_from(ip=bulb_ip, mac=bulb_mac)
+
+            bulb_config = wiz_api.parser_to_dict(self.__get_bulb_state(bulb))
+            preset[bulb_mac] = bulb_config
+
+        self.config["presets"][preset_name] = preset
+        self.save_settings()
+        print(f"saved preset `{preset_name}`")
+
     def cli_set_scene(self, args, target_macs):
         if len(args) < 1:
             self.list_scenes()
@@ -194,7 +219,7 @@ class WiZard():
 
     def __set_bulb_state(self, bulb: wizlight, state: PilotBuilder):
         loop = asyncio.get_event_loop()
-        loop.run_until_complete(bulb.set_state(state))
+        loop.run_until_complete(bulb.turn_on(state))
 
     def flash_bulb(self, bulb_mac, keep=True):
         bulb_ip = self.config["bulbs"][bulb_mac]["ip"]
@@ -235,7 +260,8 @@ COMMANDS
     off                         -- turn all bulbs off
     group <group_subcmd>        -- group related, see GROUP section
     bulb <bulb_subcmd>          -- bulb related, see BULB section
-
+    preset <preset_subcmd>      -- preset related, see PRESET section
+    save <preset_name>          -- save current config as preset
 
 BULB_SUBCOMMANDS
     list                        -- list bulbs
@@ -259,6 +285,11 @@ GROUP_SUBCOMMANDS
         rgb <r> <g> <b> [<B>]   -- set rgb for bulbs in group
         scene [<scene_number>]  -- set scene for bulbs in group
         off                     -- turn bulbs in group off
+        save <preset_name>      -- save group config as preset
+
+PRESET_SUBCOMMANDS
+    delete <preset_name>        -- delete preset
+    load <preset_name>          -- load preset
 """
         print(help_msg)
 
@@ -284,6 +315,10 @@ GROUP_SUBCOMMANDS
             print("turning all bulbs off")
             bulb_macs = self.config["bulbs"].keys()
             self.turn_bulbs_off(bulb_macs)
+
+        elif cmd == "save":
+            bulb_macs = self.config["bulbs"].keys()
+            self.cli_save_preset(args, target_macs=bulb_macs)
 
         elif cmd == "rgb":
             bulb_macs = self.config["bulbs"].keys()
@@ -488,6 +523,42 @@ GROUP_SUBCOMMANDS
 
             else:
                 print(f"ERROR: unknown action `{action}`")
+
+        elif cmd == "preset":
+            if len(args) < 1:
+                print("ERROR: no subcommand specified")
+                return
+
+            subcmd = args.pop(0)
+
+            if subcmd == "delete":
+                if len(args) < 1:
+                    print("ERROR: no preset name provided")
+                    return
+
+                preset_name = args.pop(0)
+                if preset_name not in self.config["presets"]:
+                    print(f"ERROR: preset `{preset_name}` does not exist")
+                    return
+
+                del self.config["presets"][preset_name]
+                self.save_settings()
+                print(f"preset `{preset_name}` removed")
+
+            elif subcmd == "load":
+                if len(args) < 1:
+                    print("ERROR: no preset name provided")
+                    return
+                preset_name = args.pop(0)
+                if preset_name not in self.config["presets"]:
+                    print(f"ERROR: preset `{preset_name}` does not exist")
+                    return
+
+                self.apply_preset(preset_name)
+
+            else:
+                print(f"ERROR: unknown subcommand `{subcmd}` for `preset`")
+                return
 
         else:
             print(f"ERROR: unknown command `{cmd}`")

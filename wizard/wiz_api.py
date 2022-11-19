@@ -61,17 +61,17 @@ def parser_to_builder(parser: PilotParser) -> PilotBuilder:
 
 
 def parser_to_dict(parser: PilotParser) -> Dict[str, Any]:
-    return {"warm_white": parser.get_warm_white(),
-            "cold_white": parser.get_cold_white(),
-            "speed": parser.get_speed(),
+    return {"warm_white": parser.get_warm_white() or None,
+            "cold_white": parser.get_cold_white() or None,
+            "speed": parser.get_speed() or None,
             "scene": parser.get_scene_id() or None,
-            "rgb": parser.get_rgb(),
+            "rgb": parser.get_rgb() if None not in parser.get_rgb() else None,
             "rgbw": parser.get_rgbw(),
             "rgbww": parser.get_rgbww(),
-            "brightness": parser.get_brightness(),
-            "colortemp": parser.get_colortemp(),
-            "state": parser.get_state(),
-            "ratio": parser.get_ratio()
+            "brightness": parser.get_brightness() or None,
+            "colortemp": parser.get_colortemp() or None,
+            "state": parser.get_state() or None,
+            "ratio": parser.get_ratio() or None
             }
 
 
@@ -80,7 +80,7 @@ def parser_dict_to_builder(parser_dict: Dict[str, Any]) -> PilotBuilder:
         warm_white=parser_dict["warm_white"],
         cold_white=parser_dict["cold_white"],
         speed=parser_dict["speed"],
-        scene=parser_dict["scene_id"],
+        scene=parser_dict["scene"],
         rgb=parser_dict["rgb"],
         rgbw=parser_dict["rgbw"],
         rgbww=parser_dict["rgbww"],
